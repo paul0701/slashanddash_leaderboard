@@ -161,10 +161,12 @@ canvas {
   <div id="nameOverlay" style="display:none; position:fixed; inset:0; background:rgba(5,4,12,0.9); z-index:11; align-items:center; justify-content:center; padding:16px; box-sizing:border-box;">
     <div style="background:var(--bg); color:var(--fg); border:2px solid var(--btn-border); border-radius:16px; padding:20px; max-width:340px; width:100%;">
       <h2 style="margin:0 0 10px; font-family:'Creepster',Impact,sans-serif; font-size:26px; color:#ff8a2a;">Pick a name</h2>
-      <p style="font-size:14px; opacity:0.8; margin:0 0 14px;">This is what shows on the leaderboard. Letters, numbers, spaces, - and _ only, up to 16 characters. Someone else may have already taken it.</p>
+      <p style="font-size:14px; opacity:0.8; margin:0 0 10px;">This is what shows on the leaderboard. Letters, numbers, spaces, - and _ only, up to 16 characters.</p>
       <input id="nameInput" type="text" maxlength="16" placeholder="Ninja" style="width:100%; box-sizing:border-box; font-size:18px; padding:10px; border-radius:8px; border:2px solid var(--btn-border); background:transparent; color:var(--fg);">
+      <p style="font-size:13px; opacity:0.75; margin:12px 0 6px;">Set a 4 to 8 digit PIN. Enter the same name and PIN on another device to pick up where you left off there too.</p>
+      <input id="pinInput" type="tel" inputmode="numeric" pattern="[0-9]*" maxlength="8" placeholder="PIN" style="width:100%; box-sizing:border-box; font-size:18px; padding:10px; border-radius:8px; border:2px solid var(--btn-border); background:transparent; color:var(--fg); letter-spacing:2px;">
       <div id="nameError" style="min-height:20px; color:#ff6b6b; font-size:14px; margin-top:6px;"></div>
-      <button id="nameClaimBtn" type="button" style="margin-top:8px; width:100%; padding:10px 18px; border-radius:10px; border:2px solid var(--btn-border); background:var(--btn); color:var(--fg); font-size:16px;">Claim name</button>
+      <button id="nameClaimBtn" type="button" style="margin-top:8px; width:100%; padding:10px 18px; border-radius:10px; border:2px solid var(--btn-border); background:var(--btn); color:var(--fg); font-size:16px;">Continue</button>
     </div>
   </div>
   <p class="hint">Keyboard: Space or Up to jump, X or Right arrow to slash. On a touchscreen, use the buttons or tap the left and right halves of the game. Jump up to grab floating power-ups.</p>
@@ -198,38 +200,67 @@ canvas {
 
   var nameOverlay = document.getElementById('nameOverlay');
   var nameInput = document.getElementById('nameInput');
+  var pinInput = document.getElementById('pinInput');
   var nameError = document.getElementById('nameError');
 
   function openNameOverlay() {
     nameInput.value = username || '';
+    pinInput.value = '';
     nameError.textContent = '';
     nameOverlay.style.display = 'flex';
     nameInput.focus();
   }
 
-  function apiClaimUsername(name) {
+  function apiClaimUsername(name, pin) {
     return fetch('/.netlify/functions/claim-username', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: name, deviceId: deviceId })
+      body: JSON.stringify({ username: name, pin: pin, deviceId: deviceId })
     }).then(function (r) { return r.json().then(function (d) { return { status: r.status, data: d }; }); });
+  }
+
+  function apiLoginUsername(name, pin) {
+    return fetch('/.netlify/functions/login-username', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: name, pin: pin, deviceId: deviceId })
+    }).then(function (r) { return r.json().then(function (d) { return { status: r.status, data: d }; }); });
+  }
+
+  function acceptUsername(name) {
+    username = name;
+    try { localStorage.setItem('slashdash_username', username); } catch (e) {}
+    nameOverlay.style.display = 'none';
   }
 
   document.getElementById('nameClaimBtn').addEventListener('click', function () {
     var candidate = (nameInput.value || '').trim();
+    var pin = (pinInput.value || '').trim();
     if (candidate.length < 2) { nameError.textContent = 'At least 2 characters.'; return; }
     if (!/^[A-Za-z0-9 _-]+$/.test(candidate)) { nameError.textContent = 'Letters, numbers, spaces, - and _ only.'; return; }
+    if (!/^[0-9]{4,8}$/.test(pin)) { nameError.textContent = 'PIN needs to be 4 to 8 digits.'; return; }
     nameError.textContent = 'Checking…';
-    apiClaimUsername(candidate).then(function (res) {
+    apiClaimUsername(candidate, pin).then(function (res) {
       if (res.status === 200 && res.data.ok) {
-        username = res.data.username;
-        try { localStorage.setItem('slashdash_username', username); } catch (e) {}
-        nameOverlay.style.display = 'none';
-      } else if (res.status === 409) {
-        nameError.textContent = 'That name is already taken - try another.';
-      } else {
-        nameError.textContent = 'Could not claim that name right now - try again.';
+        acceptUsername(res.data.username);
+        return;
       }
+      if (res.status === 409) {
+        // name's taken by someone - but if it's actually this player on a new
+        // device, the same name + PIN should log them straight in
+        nameError.textContent = 'Name taken - checking if that PIN matches…';
+        apiLoginUsername(candidate, pin).then(function (loginRes) {
+          if (loginRes.status === 200 && loginRes.data.ok) {
+            acceptUsername(loginRes.data.username);
+          } else {
+            nameError.textContent = 'That name is taken and the PIN does not match - try a different name.';
+          }
+        }).catch(function () {
+          nameError.textContent = 'Network error - try again.';
+        });
+        return;
+      }
+      nameError.textContent = 'Could not claim that name right now - try again.';
     }).catch(function () {
       nameError.textContent = 'Network error - try again.';
     });
@@ -237,6 +268,9 @@ canvas {
 
   document.getElementById('changeNameBtn').addEventListener('click', openNameOverlay);
   nameInput.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { e.preventDefault(); document.getElementById('nameClaimBtn').click(); }
+  });
+  pinInput.addEventListener('keydown', function (e) {
     if (e.key === 'Enter') { e.preventDefault(); document.getElementById('nameClaimBtn').click(); }
   });
 
